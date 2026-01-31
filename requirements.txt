@@ -1,0 +1,4 @@
+requests>=2.31.0
+sounddevice>=0.4.6
+soundfile>=0.12.1
+TTS>=0.22.0
