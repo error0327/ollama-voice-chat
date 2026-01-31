@@ -2,7 +2,7 @@
 param(
     [string]$OllamaHost = "0.0.0.0",
     [int]$OllamaPort = 11434,
-    [string[]]$Models = @("gurubot/girl", "llama2-uncensored"),
+    [string[]]$Models = @("deepseek-r1:7b"),
     [string]$PythonExe = "python",
     [switch]$SkipBuildTools
 )

@@ -1,11 +1,11 @@
 # Ollama Voice Chat
 
-Interactive Ollama client for Windows that speaks responses through Coqui TTS. The project includes an automated setup script that prepares Ollama for remote access, installs the required voice packages, and downloads pre-selected models.
+Interactive Ollama client for Windows that speaks responses through Coqui TTS. The project includes an automated setup script that prepares Ollama for remote access, installs the required voice packages, and downloads the DeepSeek-R1 7B model.
 
 ## Features
 
 - Installs and configures Ollama with firewall access for LAN clients.
-- Downloads custom models (gurubot/girl and llama2-uncensored by default).
+- Downloads DeepSeek-R1 7B by default.
 - Sets up a Python virtual environment with Coqui TTS dependencies.
 - Provides a CLI chat loop that plays each reply aloud.
 
@@ -31,7 +31,7 @@ Interactive Ollama client for Windows that speaks responses through Coqui TTS. T
 
    ```powershell
    ./.venv/Scripts/Activate.ps1
-   python src/ollama_voice.py --model gurubot/girl
+   python src/ollama_voice.py --model deepseek-r1:7b
    ```
 
 4. For remote clients, pass the machine's LAN IP to the `--host` flag when launching the chat script.
@@ -47,7 +47,7 @@ Interactive Ollama client for Windows that speaks responses through Coqui TTS. T
 5. Creates a `.venv` virtual environment and installs packages from `requirements.txt`.
 6. Starts `ollama serve` in the background and pulls the models listed in the script parameters.
 
-The script defaults to downloading `gurubot/girl` and `llama2-uncensored`. Override the list with `-Models` if you need different models.
+The script defaults to downloading `deepseek-r1:7b`. Override the list with `-Models` if you need different models.
 
 ## Manual Installation
 
@@ -78,8 +78,7 @@ If you prefer to run the steps yourself, execute the following commands in an el
    ```powershell
    ollama serve
    # In a new window
-   ollama pull gurubot/girl
-   ollama pull llama2-uncensored
+   ollama pull deepseek-r1:7b
    ```
 
 5. Create a virtual environment and install Python dependencies:
@@ -96,7 +95,7 @@ If you prefer to run the steps yourself, execute the following commands in an el
 After setup, launch the chat loop (activate the virtual environment first):
 
 ```powershell
-python src/ollama_voice.py --host 127.0.0.1 --model gurubot/girl
+python src/ollama_voice.py --host 127.0.0.1 --model deepseek-r1:7b
 ```
 
 Key flags:

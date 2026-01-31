@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Chat with Ollama using Coqui TTS playback.")
     parser.add_argument("--host", default=os.environ.get("OLLAMA_HOST", "127.0.0.1"), help="Ollama host or IP")
     parser.add_argument("--port", default=os.environ.get("OLLAMA_PORT", "11434"), help="Ollama port")
-    parser.add_argument("--model", default="gurubot/girl", help="Ollama model name")
+    parser.add_argument("--model", default="deepseek-r1:7b", help="Ollama model name")
     parser.add_argument(
         "--tts-model",
         default="tts_models/en/jenny/jenny",
