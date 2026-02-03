@@ -1,6 +1,6 @@
 # Ollama Voice Chat
 
-Interactive Ollama client for Windows that speaks responses through Coqui TTS. The project includes an automated setup script that prepares Ollama for remote access, installs the required voice packages, and downloads the DeepSeek-R1 7B model.
+Interactive Ollama client for Windows that speaks responses through Coqui TTS. The project includes an automated setup script that prepares Ollama for remote access, installs the required voice packages, and downloads the DeepSeek-R1 7B model. Push-to-talk voice input is powered by faster-whisper for on-the-fly transcription.
 
 ## Features
 
@@ -8,6 +8,7 @@ Interactive Ollama client for Windows that speaks responses through Coqui TTS. T
 - Downloads DeepSeek-R1 7B by default.
 - Sets up a Python virtual environment with Coqui TTS dependencies.
 - Provides a CLI chat loop that plays each reply aloud.
+- Optional push-to-talk mode with hotkey-driven microphone capture and faster-whisper transcription.
 
 ## Requirements
 
@@ -34,7 +35,13 @@ Interactive Ollama client for Windows that speaks responses through Coqui TTS. T
    python src/ollama_voice.py --model deepseek-r1:7b
    ```
 
-4. For remote clients, pass the machine's LAN IP to the `--host` flag when launching the chat script.
+4. Enable push-to-talk (hold the hotkey instead of typing) with:
+
+   ```powershell
+   python src/ollama_voice.py --push-to-talk --model deepseek-r1:7b
+   ```
+
+5. For remote clients, pass the machine's LAN IP to the `--host` flag when launching the chat script.
 
 ## Automated Setup Script
 
@@ -48,6 +55,20 @@ Interactive Ollama client for Windows that speaks responses through Coqui TTS. T
 6. Starts `ollama serve` in the background and pulls the models listed in the script parameters.
 
 The script defaults to downloading `deepseek-r1:7b`. Override the list with `-Models` if you need different models.
+
+### Push-to-Talk Notes
+
+- Hold the configured key (default `right shift`) to record; release to send the transcription.
+- Change the key with `--push-to-talk-key` and select microphones via `--mic-device`.
+- Speech-to-text uses faster-whisper. If the dependency is missing, fall back to typed input.
+
+### Fast Model Option
+
+`tinyllama` (~0.7 GB) offers minimal startup latency on CPU-only systems. Pull it with `ollama pull tinyllama`, then launch:
+
+```powershell
+python src/ollama_voice.py --push-to-talk --model tinyllama
+```
 
 ## Manual Installation
 
@@ -106,6 +127,11 @@ Key flags:
 - `--tts-model`: Coqui TTS voice (defaults to `tts_models/en/jenny/jenny`).
 - `--audio-device`: Optional sounddevice target (index or name).
 - `--tts-chunk-chars`: Max characters to synthesize per audio chunk (default 220).
+- `--push-to-talk`: Enable hotkey-controlled microphone capture.
+- `--push-to-talk-key`: Keyboard key label for capture (default `right shift`).
+- `--mic-device`: sounddevice input index or name for voice capture.
+- `--mic-sample-rate`: Microphone sampling rate (default 16000 Hz).
+- `--stt-model`: faster-whisper model identifier (default `base.en`).
 
 ## Verifying Remote Access
 

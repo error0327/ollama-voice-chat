@@ -313,7 +313,8 @@ try {
     Pull-OllamaModels -ModelList $Models
 
     Write-Host "\nSetup complete. Activate the virtual environment with:`n    .\\.venv\\Scripts\\Activate.ps1" -ForegroundColor Green
-    Write-Host "Then start chatting via:`n    python src/ollama_voice.py --model $($Models[0])" -ForegroundColor Green
+    Write-Host "Start chatting with typing via:`n    python src/ollama_voice.py --model $($Models[0])" -ForegroundColor Green
+    Write-Host "Enable push-to-talk after activation using:`n    python src/ollama_voice.py --push-to-talk --model $($Models[0])" -ForegroundColor Green
 }
 catch {
     Write-Error $_
