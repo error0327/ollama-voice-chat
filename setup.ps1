@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$OllamaHost = "0.0.0.0",
+    [string]$OllamaHost = "127.0.0.1",
     [int]$OllamaPort = 11434,
     [string[]]$Models = @("deepseek-r1:7b"),
     [string]$PythonExe = "python",
@@ -48,6 +48,49 @@ function Invoke-Winget {
         }
         throw "winget install for '$Id' failed with exit code $($proc.ExitCode)."
     }
+}
+
+function Install-BuildToolsBootstrapper {
+    param([string[]]$OverrideArguments)
+
+    $programFilesX86 = ${env:ProgramFiles(x86)}
+    $existingInstall = $null
+    if ($programFilesX86) {
+        $vswhere = Join-Path $programFilesX86 "Microsoft Visual Studio/Installer/vswhere.exe"
+        if (Test-Path $vswhere) {
+            $existingInstall = & $vswhere -products Microsoft.VisualStudio.Product.BuildTools -latest -property installationPath 2>$null
+            if (-not $existingInstall) {
+                $existingInstall = $null
+            }
+        }
+    }
+
+    if ($existingInstall) {
+        $installerExe = Join-Path $programFilesX86 "Microsoft Visual Studio/Installer/vs_installer.exe"
+        if (-not (Test-Path $installerExe)) {
+            throw "Unable to locate vs_installer.exe to modify existing Build Tools installation."
+        }
+        Write-Host "[build-tools] Modifying existing Visual Studio Build Tools installation..."
+        $arguments = @("modify", "--installPath", $existingInstall) + $OverrideArguments
+        $proc = Start-Process -FilePath $installerExe -ArgumentList $arguments -Wait -PassThru
+    }
+    else {
+        $downloadUri = "https://aka.ms/vs/17/release/vs_BuildTools.exe"
+        $tempPath = [IO.Path]::Combine([IO.Path]::GetTempPath(), "vs_BuildTools.exe")
+        Write-Host "[build-tools] Downloading Visual Studio Build Tools bootstrapper..."
+        Invoke-WebRequest -Uri $downloadUri -OutFile $tempPath -UseBasicParsing
+        Write-Host "[build-tools] Running Visual Studio Build Tools bootstrapper..."
+        $proc = Start-Process -FilePath $tempPath -ArgumentList $OverrideArguments -Wait -PassThru
+    }
+
+    if ($proc.ExitCode -in 0, 3010, 1641) {
+        if ($proc.ExitCode -eq 3010 -or $proc.ExitCode -eq 1641) {
+            Write-Host "[build-tools] Installation requires a reboot to finalize." -ForegroundColor Yellow
+        }
+        return $proc.ExitCode
+    }
+
+    throw "Visual Studio Build Tools bootstrapper exited with code $($proc.ExitCode)."
 }
 
 function Ensure-Ollama {
@@ -104,23 +147,27 @@ function Ensure-Python {
 }
 
 function Test-BuildToolsInstalled {
-    $vsInstallerRoot = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer"
-    $vswhere = Join-Path $vsInstallerRoot "vswhere.exe"
-    if (Test-Path $vswhere) {
-        $installationPath = & $vswhere -products Microsoft.VisualStudio.Product.BuildTools -latest -property installationPath 2>$null
-        if ($LASTEXITCODE -eq 0 -and $installationPath) {
+    $programFilesX86 = ${env:ProgramFiles(x86)}
+    if (-not $programFilesX86) {
+        return $false
+    }
+
+    $vsRoot = Join-Path $programFilesX86 "Microsoft Visual Studio"
+    if (Test-Path $vsRoot) {
+        $hasCl = Get-ChildItem -Path $vsRoot -Filter "cl.exe" -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "BuildTools\\VC\\Tools\\MSVC" } |
+            Select-Object -First 1
+        if ($hasCl) {
             return $true
         }
     }
 
-    $defaultPath = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/2022/BuildTools"
-    if (Test-Path $defaultPath) {
-        return $true
-    }
-
-    $wingetEntry = winget list --id "Microsoft.VisualStudio.2022.BuildTools" --exact 2>$null | Select-String "Microsoft.VisualStudio.2022.BuildTools" -Quiet
-    if ($wingetEntry) {
-        return $true
+    $vswhere = Join-Path $programFilesX86 "Microsoft Visual Studio/Installer/vswhere.exe"
+    if (Test-Path $vswhere) {
+        $installationPath = & $vswhere -products Microsoft.VisualStudio.Product.BuildTools -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -latest -property installationPath 2>$null
+        if ($LASTEXITCODE -eq 0 -and $installationPath) {
+            return $true
+        }
     }
 
     return $false
@@ -135,20 +182,34 @@ function Ensure-BuildTools {
         Write-Host "[build-tools] Build Tools already detected; skipping install."
         return
     }
-    $override = "--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools"
+    $overrideArgs = @(
+        "--wait",
+        "--quiet",
+        "--norestart",
+        "--nocache",
+        "--includeRecommended",
+        "--add", "Microsoft.VisualStudio.Workload.VCTools",
+        "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+    )
+    $override = ($overrideArgs -join " ")
+    $bootstrapExit = $null
     try {
         Invoke-Winget -Id "Microsoft.VisualStudio.2022.BuildTools" -Override $override
     }
     catch {
-        if (Test-BuildToolsInstalled) {
-            Write-Host "[build-tools] winget reported an error but Build Tools are present; continuing."
-            return
-        }
-        throw
+        Write-Warning "[build-tools] winget install failed: $($_.Exception.Message)"
     }
 
     if (-not (Test-BuildToolsInstalled)) {
-        Write-Warning "Visual Studio Build Tools installation could not be verified; continuing per user request."
+        $bootstrapExit = Install-BuildToolsBootstrapper -OverrideArguments $overrideArgs
+    }
+
+    if (-not (Test-BuildToolsInstalled)) {
+        if ($bootstrapExit -in 3010, 1641) {
+            Write-Warning "[build-tools] VC toolchain not visible yet; restart Windows and rerun setup.ps1 if native builds fail."
+            return
+        }
+        throw "Visual Studio Build Tools installation could not be verified after bootstrapper install."
     }
 }
 
@@ -174,10 +235,28 @@ function Ensure-Venv {
         [string]$PythonPath
     )
     $venvPath = Join-Path $Root ".venv"
+    $activatePath = Join-Path $venvPath "Scripts/Activate.ps1"
+    $needsRebuild = $false
+
     if (-not (Test-Path $venvPath)) {
+        $needsRebuild = $true
+    }
+    elseif (-not (Test-Path $activatePath)) {
+        Write-Host "[python] Existing virtual environment missing activation scripts; recreating."
+        $needsRebuild = $true
+        try {
+            Remove-Item -Path $venvPath -Recurse -Force -ErrorAction Stop
+        }
+        catch {
+            throw "Failed to remove invalid virtual environment at ${venvPath}: $($_.Exception.Message)"
+        }
+    }
+
+    if ($needsRebuild) {
         Write-Host "[python] Creating virtual environment at $venvPath"
         & $PythonPath -m venv $venvPath
-    } else {
+    }
+    else {
         Write-Host "[python] Virtual environment already exists."
     }
     return $venvPath

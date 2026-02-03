@@ -42,7 +42,7 @@ Interactive Ollama client for Windows that speaks responses through Coqui TTS. T
 
 1. Installs Ollama via winget if it is missing (`winget install --id Ollama.Ollama`).
 2. Installs Visual Studio Build Tools with the VC toolchain (skip with `-SkipBuildTools`).
-3. Persists `OLLAMA_HOST=0.0.0.0` and `OLLAMA_PORT=11434` for remote access.
+3. Persists `OLLAMA_HOST=127.0.0.1` and `OLLAMA_PORT=11434` for local use (override with `-OllamaHost 0.0.0.0` to expose remotely).
 4. Opens Windows Firewall for TCP 11434.
 5. Creates a `.venv` virtual environment and installs packages from `requirements.txt`.
 6. Starts `ollama serve` in the background and pulls the models listed in the script parameters.
@@ -68,7 +68,7 @@ If you prefer to run the steps yourself, execute the following commands in an el
 3. Set Ollama environment variables and open the firewall:
 
    ```powershell
-   [Environment]::SetEnvironmentVariable("OLLAMA_HOST", "0.0.0.0", "Machine")
+   [Environment]::SetEnvironmentVariable("OLLAMA_HOST", "127.0.0.1", "Machine")
    [Environment]::SetEnvironmentVariable("OLLAMA_PORT", "11434", "Machine")
    New-NetFirewallRule -DisplayName "Ollama HTTP 11434" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 11434
    ```
@@ -105,6 +105,7 @@ Key flags:
 - `--model`: Ollama model to query.
 - `--tts-model`: Coqui TTS voice (defaults to `tts_models/en/jenny/jenny`).
 - `--audio-device`: Optional sounddevice target (index or name).
+- `--tts-chunk-chars`: Max characters to synthesize per audio chunk (default 220).
 
 ## Verifying Remote Access
 
