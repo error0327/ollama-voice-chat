@@ -1,9 +1,9 @@
 import argparse
+import json
 import os
 import queue
 import re
 import sys
-import tempfile
 import textwrap
 import threading
 import time
@@ -13,12 +13,130 @@ from typing import Any
 import numpy as np
 import requests
 import sounddevice as sd
-import soundfile as sf
-from TTS.api import TTS
+try:
+    import onnxruntime as ort
+except Exception:  # pragma: no cover - optional dependency for GPU detection
+    ort = None  # type: ignore[assignment]
+
+try:
+    import ctranslate2  # type: ignore
+except Exception:  # pragma: no cover - optional dependency for GPU detection
+    ctranslate2 = None  # type: ignore[assignment]
+
+try:
+    from piper import PiperVoice
+    from piper.config import PiperConfig
+    from piper.download import ensure_voice_exists, find_voice, get_voices
+except Exception:  # pragma: no cover - optional runtime dependency
+    PiperVoice = None  # type: ignore[assignment]
+    PiperConfig = None  # type: ignore[assignment]
+    ensure_voice_exists = None  # type: ignore[assignment]
+    find_voice = None  # type: ignore[assignment]
+    get_voices = None  # type: ignore[assignment]
 
 STOP_SENTINEL = object()
 QUEUE_KIND_TEXT = "text"
 QUEUE_KIND_VOICE = "voice"
+
+DEFAULT_PIPER_VOICE = "en_US-lessac-low"
+PIPER_CACHE_DIR = Path.home() / ".cache" / "ollama-voice-chat" / "piper"
+
+
+def gpu_is_available() -> bool:
+    try:
+        if ort is not None and "CUDAExecutionProvider" in set(ort.get_available_providers()):
+            return True
+    except Exception:
+        pass
+    try:
+        if ctranslate2 is not None and ctranslate2.get_cuda_device_count() > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def parse_device_string(device: str) -> tuple[str, int | None]:
+    text = device.strip().lower()
+    if not text:
+        return text, None
+    if ":" in text:
+        base, index_text = text.split(":", 1)
+        try:
+            return base, int(index_text)
+        except ValueError:
+            return base, None
+    return text, None
+
+
+def ensure_piper_dependencies() -> None:
+    if PiperVoice is None or PiperConfig is None:
+        raise RuntimeError("piper-tts package is required for speech playback; reinstall optional dependencies")
+    if ort is None:
+        raise RuntimeError("onnxruntime is required for speech playback; reinstall optional dependencies")
+
+
+def _infer_config_path(model_path: Path) -> Path:
+    candidates = [
+        model_path.with_suffix(model_path.suffix + ".json"),
+        model_path.with_suffix(".json"),
+        model_path.parent / f"{model_path.name}.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"Unable to locate Piper config file for {model_path}.")
+
+
+def load_piper_voice(
+    model_name: str,
+    config_path_override: str | None,
+    download_dir: Path,
+    use_cuda: bool,
+    cuda_device_index: int,
+) -> PiperVoice:
+    ensure_piper_dependencies()
+    download_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path: Path | None = Path(config_path_override) if config_path_override else None
+    if config_path is not None and not config_path.exists():
+        raise FileNotFoundError(f"Piper config not found at {config_path}.")
+    model_path_candidate = Path(model_name)
+
+    if model_path_candidate.exists():
+        model_path = model_path_candidate
+        if config_path is None:
+            config_path = _infer_config_path(model_path)
+    else:
+        if ensure_voice_exists is None or find_voice is None or get_voices is None:
+            raise RuntimeError(
+                "Unable to download Piper voice automatically; specify --tts-model with a local .onnx path."
+            )
+        voices_info = get_voices(download_dir, update_voices=False)
+        ensure_voice_exists(model_name, [download_dir], download_dir, voices_info)
+        model_path, config_path = find_voice(model_name, [download_dir])
+
+    if config_path is None:
+        raise FileNotFoundError(f"Missing Piper config for {model_name}.")
+
+    with open(config_path, "r", encoding="utf-8") as handle:
+        config_dict = json.load(handle)
+
+    session_options = ort.SessionOptions()
+    if use_cuda:
+        providers: list[object] = [
+            (
+                "CUDAExecutionProvider",
+                {"device_id": str(cuda_device_index), "cudnn_conv_algo_search": "HEURISTIC"},
+            ),
+            "CPUExecutionProvider",
+        ]
+    else:
+        providers = ["CPUExecutionProvider"]
+
+    session = ort.InferenceSession(str(model_path), sess_options=session_options, providers=providers)
+    config = PiperConfig.from_dict(config_dict)
+    return PiperVoice(session=session, config=config)
 
 
 def _ensure_rocm_stub(exc: FileNotFoundError) -> bool:
@@ -88,20 +206,19 @@ def iter_speech_chunks(text: str, max_chars: int) -> list[str]:
     return chunks
 
 
-def speak_text(tts: TTS, text: str, chunk_chars: int) -> None:
+def speak_text(tts_voice: PiperVoice, text: str, chunk_chars: int) -> None:
+    sample_rate = int(tts_voice.config.sample_rate)
     for chunk in iter_speech_chunks(text, chunk_chars):
-        fd, tmp_name = tempfile.mkstemp(suffix=".wav")
-        os.close(fd)
-        tmp_path = Path(tmp_name)
-        try:
-            # Generate speech audio in small chunks to reduce latency.
-            tts.tts_to_file(text=chunk, file_path=str(tmp_path))
-            data, rate = sf.read(tmp_path, dtype="float32")
-            sd.play(data, rate)
-            sd.wait()
-        finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
+        audio_segments: list[np.ndarray] = []
+        for raw_bytes in tts_voice.synthesize_stream_raw(chunk, sentence_silence=0.05):
+            segment = np.frombuffer(raw_bytes, dtype="<i2").astype("float32") / 32768.0
+            if segment.size:
+                audio_segments.append(segment)
+        if not audio_segments:
+            continue
+        audio = np.concatenate(audio_segments)
+        sd.play(audio, sample_rate)
+        sd.wait()
 
 
 def ensure_keyboard_available() -> None:
@@ -115,9 +232,17 @@ def ensure_stt_available() -> type[Any]:
     return WhisperModel  # type: ignore[return-value]
 
 
-def create_stt_model(model_id: str, device: str, compute_type: str) -> Any:
+def create_stt_model(
+    model_id: str,
+    device: str,
+    compute_type: str,
+    device_index: int | None,
+) -> Any:
     model_cls = ensure_stt_available()
-    return model_cls(model_id, device=device, compute_type=compute_type)
+    kwargs: dict[str, Any] = {}
+    if device.startswith("cuda") and device_index is not None:
+        kwargs["device_index"] = device_index
+    return model_cls(model_id, device=device, compute_type=compute_type, **kwargs)
 
 
 def record_voice_session(
@@ -251,7 +376,7 @@ def start_voice_input_worker(
 def interactive_loop(
     base_url: str,
     model: str,
-    tts_model: str,
+    tts_voice: PiperVoice,
     device: str | None,
     chunk_chars: int,
     push_to_talk: bool,
@@ -262,7 +387,6 @@ def interactive_loop(
     stt_beam_size: int,
     voice_block_size: int,
 ) -> None:
-    tts = TTS(model_name=tts_model)
     current_output = sd.default.device
     if device is not None:
         if isinstance(current_output, (tuple, list)) and current_output:
@@ -287,7 +411,7 @@ def interactive_loop(
                 continue
             print(f"Bot: {reply}")
             try:
-                speak_text(tts, reply, chunk_chars)
+                speak_text(tts_voice, reply, chunk_chars)
             except Exception as exc:  # noqa: BLE001 keep loop alive
                 print(f"[error] TTS playback failed: {exc}")
         return
@@ -333,7 +457,7 @@ def interactive_loop(
                 continue
             print(f"Bot: {reply}")
             try:
-                speak_text(tts, reply, chunk_chars)
+                speak_text(tts_voice, reply, chunk_chars)
             except Exception as exc:  # noqa: BLE001 keep loop alive
                 print(f"[error] TTS playback failed: {exc}")
     finally:
@@ -344,14 +468,36 @@ def interactive_loop(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Chat with Ollama using Coqui TTS playback.")
+    parser = argparse.ArgumentParser(description="Chat with Ollama using Piper TTS playback.")
     parser.add_argument("--host", default=os.environ.get("OLLAMA_HOST", "127.0.0.1"), help="Ollama host or IP")
     parser.add_argument("--port", default=os.environ.get("OLLAMA_PORT", "11434"), help="Ollama port")
     parser.add_argument("--model", default="deepseek-r1:7b", help="Ollama model name")
     parser.add_argument(
         "--tts-model",
-        default="tts_models/en/jenny/jenny",
-        help="Coqui TTS model identifier",
+        default=DEFAULT_PIPER_VOICE,
+        help="Piper voice identifier or local path to a .onnx model",
+    )
+    parser.add_argument(
+        "--tts-config",
+        default=None,
+        help="Optional path to Piper voice config (use with local .onnx models)",
+    )
+    parser.add_argument(
+        "--tts-device",
+        choices=["auto", "cpu", "gpu"],
+        default="auto",
+        help="Preferred device for TTS synthesis (auto selects GPU when available)",
+    )
+    parser.add_argument(
+        "--tts-gpu-index",
+        type=int,
+        default=0,
+        help="CUDA device index for TTS when GPU acceleration is enabled",
+    )
+    parser.add_argument(
+        "--tts-voices-dir",
+        default=None,
+        help="Cache directory for downloaded Piper voices (default: %USERPROFILE%/.cache/ollama-voice-chat/piper)",
     )
     parser.add_argument(
         "--audio-device",
@@ -398,13 +544,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stt-device",
-        default="cpu",
-        help="Hardware device for faster-whisper (e.g. cpu, cuda)",
+        default="auto",
+        help="Hardware device for faster-whisper (auto picks cuda when available)",
+    )
+    parser.add_argument(
+        "--stt-gpu-index",
+        type=int,
+        default=0,
+        help="CUDA device index for faster-whisper when running on GPU",
     )
     parser.add_argument(
         "--stt-compute-type",
-        default="int8_float32",
-        help="Compute precision for faster-whisper (e.g. float16, int8_float32)",
+        default="auto",
+        help="Compute precision for faster-whisper (auto floats to float16 on GPU, int8 on CPU)",
     )
     parser.add_argument(
         "--stt-beam-size",
@@ -418,11 +570,78 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     base_url = f"http://{args.host}:{args.port}"
+    gpu_available = gpu_is_available()
+    tts_choice = args.tts_device.lower()
+    tts_gpu_index = args.tts_gpu_index
+    if tts_choice == "gpu":
+        if not gpu_available:
+            print("[warn] GPU requested for TTS but no CUDA device detected; falling back to CPU")
+        tts_use_gpu = gpu_available
+    elif tts_choice == "cpu":
+        tts_use_gpu = False
+    else:  # auto
+        tts_use_gpu = gpu_available
+
+    voices_dir = Path(args.tts_voices_dir) if args.tts_voices_dir else PIPER_CACHE_DIR
+    try:
+        tts_voice = load_piper_voice(args.tts_model, args.tts_config, voices_dir, tts_use_gpu, tts_gpu_index)
+    except Exception as exc:  # noqa: BLE001 surface initialization failure
+        print(f"[error] Unable to initialize Piper voice '{args.tts_model}': {exc}")
+        return 1
+
+    provider_names = tuple(tts_voice.session.get_providers())
+    if "CUDAExecutionProvider" in provider_names:
+        provider_options = tts_voice.session.get_provider_options().get("CUDAExecutionProvider", {})
+        device_id = provider_options.get("device_id", str(tts_gpu_index))
+        if tts_use_gpu:
+            print(f"[info] Piper TTS initialized on CUDA device {device_id}.")
+        else:
+            print(f"[info] Piper TTS auto-selected CUDA device {device_id}.")
+    elif tts_use_gpu:
+        print("[warn] Requested CUDA for TTS but CUDAExecutionProvider is unavailable; using CPU instead.")
+
+    stt_device_arg = str(args.stt_device).strip()
+    stt_device_base, stt_device_index_override = parse_device_string(stt_device_arg)
+
+    stt_gpu_index = args.stt_gpu_index
+    stt_device: str
+    stt_device_index: int | None = None
+    if stt_device_base in {"", "auto"}:
+        if gpu_available:
+            stt_device = "cuda"
+            stt_device_index = stt_gpu_index
+        else:
+            stt_device = "cpu"
+    elif stt_device_base in {"gpu", "cuda"}:
+        if not gpu_available:
+            print("[warn] GPU requested for STT but no CUDA device detected; using CPU instead")
+            stt_device = "cpu"
+        else:
+            stt_device = "cuda"
+            if stt_device_index_override is not None:
+                stt_device_index = stt_device_index_override
+            else:
+                stt_device_index = stt_gpu_index
+    else:
+        stt_device = stt_device_base or stt_device_arg
+        stt_device_index = stt_device_index_override
+
+    stt_compute_arg = str(args.stt_compute_type).strip()
+    if stt_compute_arg.lower() == "auto":
+        stt_compute_type = "float16" if stt_device.startswith("cuda") else "int8_float32"
+    else:
+        stt_compute_type = stt_compute_arg
+
     stt_model = None
     if args.push_to_talk:
         ensure_keyboard_available()
+        if stt_device.startswith("cuda") and stt_device_index is not None:
+            device_label = f"{stt_device}:{stt_device_index}"
+        else:
+            device_label = stt_device
+        print(f"[info] Initializing speech recognition on {device_label} ({stt_compute_type}).")
         try:
-            stt_model = create_stt_model(args.stt_model, args.stt_device, args.stt_compute_type)
+            stt_model = create_stt_model(args.stt_model, stt_device, stt_compute_type, stt_device_index)
         except Exception as exc:  # noqa: BLE001 - bubble up in CLI context
             print(f"[error] Unable to initialize speech recognition: {exc}")
             return 1
@@ -430,7 +649,7 @@ def main() -> int:
         interactive_loop(
             base_url,
             args.model,
-            args.tts_model,
+            tts_voice,
             args.audio_device,
             args.tts_chunk_chars,
             args.push_to_talk,

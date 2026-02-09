@@ -1,21 +1,22 @@
 # Ollama Voice Chat
 
-Interactive Ollama client for Windows that speaks responses through Coqui TTS. The project includes an automated setup script that prepares Ollama for remote access, installs the required voice packages, and downloads the DeepSeek-R1 7B model. Push-to-talk voice input is powered by faster-whisper for on-the-fly transcription.
+Interactive Ollama client for Windows that speaks responses through Piper TTS (ONNX Runtime). The project includes an automated setup script that prepares Ollama for remote access, installs the required voice packages, and downloads the DeepSeek-R1 7B model. Push-to-talk voice input is powered by faster-whisper for on-the-fly transcription.
 
 ## Features
 
 - Installs and configures Ollama with firewall access for LAN clients.
 - Downloads DeepSeek-R1 7B by default.
-- Sets up a Python virtual environment with Coqui TTS dependencies.
+- Sets up a Python virtual environment with Piper TTS and ONNX Runtime dependencies.
 - Provides a CLI chat loop that plays each reply aloud.
 - Optional push-to-talk mode with hotkey-driven microphone capture and faster-whisper transcription.
+- GPU-aware configuration for both TTS playback and speech-to-text, with device selection controls.
 
 ## Requirements
 
 - Windows 11 with administrator rights.
 - winget available in PATH.
 - Python 3.10 or later.
-- At least 15 GB free disk space (Coqui voice model plus Ollama models).
+- At least 15 GB free disk space (Piper voice model plus Ollama models).
 - Speakers or headphones on the host machine.
 
 ## Quick Start
@@ -64,11 +65,26 @@ The script defaults to downloading `deepseek-r1:7b`. Override the list with `-Mo
 
 ### Fast Model Option
 
-`tinyllama` (~0.7 GB) offers minimal startup latency on CPU-only systems. Pull it with `ollama pull tinyllama`, then launch:
+`tinyllama` (~0.7 GB) offers minimal startup latency on CPU-only systems. Pull it with `ollama pull tinyllama`, then launch:
 
 ```powershell
 python src/ollama_voice.py --push-to-talk --model tinyllama
 ```
+
+### GPU Acceleration
+
+- Enable GPU playback by passing `--tts-device gpu` (default `auto` will use GPU if CUDA is available).
+- Run speech-to-text on GPU with `--stt-device cuda` (defaults to auto-detect, falling back to CPU if needed).
+- Target a specific RTX device when multiple GPUs are present using `--tts-gpu-index` and `--stt-gpu-index` (or embed the index in `--stt-device`, e.g. `cuda:1`).
+- Install the CUDA-enabled ONNX Runtime package to accelerate Piper TTS alongside faster-whisper.
+- The setup script automatically switches `onnxruntime` to `onnxruntime-gpu` and installs `faster-whisper[gpu]` when an NVIDIA adapter is detected.
+
+### Piper Voices
+
+- The default `en_US-lessac-low` voice downloads automatically into `%USERPROFILE%\.cache\ollama-voice-chat\piper` the first time you run the script.
+- Pass a different Piper identifier (for example `en_GB-alba-medium`) with `--tts-model` to fetch and cache an alternate voice.
+- For local voices, point `--tts-model` at the `.onnx` file and provide the matching `.onnx.json` via `--tts-config` if it is not adjacent to the model.
+- Override the download/cache directory with `--tts-voices-dir` when you want to share voices across projects.
 
 ## Manual Installation
 
@@ -80,7 +96,7 @@ If you prefer to run the steps yourself, execute the following commands in an el
    winget install --id Ollama.Ollama --exact --accept-package-agreements --accept-source-agreements --silent
    ```
 
-2. Install VC Build Tools (required by Coqui TTS):
+2. Install VC Build Tools (ensures native audio dependencies compile when needed):
 
    ```powershell
    winget install --id Microsoft.VisualStudio.2022.BuildTools --exact --accept-package-agreements --accept-source-agreements --silent --override "--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools"
@@ -124,7 +140,11 @@ Key flags:
 - `--host`: Ollama server host (use the machine's LAN IP for remote clients).
 - `--port`: Ollama port (defaults to 11434).
 - `--model`: Ollama model to query.
-- `--tts-model`: Coqui TTS voice (defaults to `tts_models/en/jenny/jenny`).
+- `--tts-model`: Piper voice identifier or path to a `.onnx` model (defaults to `en_US-lessac-low`).
+- `--tts-config`: Optional path to the `.onnx.json` config file when pointing `--tts-model` at a local voice.
+- `--tts-voices-dir`: Directory used to cache downloaded Piper voices.
+- `--tts-device`: Preferred device for TTS synthesis (`auto`, `cpu`, `gpu`).
+- `--tts-gpu-index`: CUDA device index for TTS when using GPU acceleration.
 - `--audio-device`: Optional sounddevice target (index or name).
 - `--tts-chunk-chars`: Max characters to synthesize per audio chunk (default 220).
 - `--push-to-talk`: Enable hotkey-controlled microphone capture.
@@ -132,6 +152,8 @@ Key flags:
 - `--mic-device`: sounddevice input index or name for voice capture.
 - `--mic-sample-rate`: Microphone sampling rate (default 16000 Hz).
 - `--stt-model`: faster-whisper model identifier (default `base.en`).
+- `--stt-device`: Speech-to-text device (`auto`, `cpu`, `cuda`, or `cuda:<index>`).
+- `--stt-gpu-index`: CUDA device index for faster-whisper when using GPU.
 
 ## Verifying Remote Access
 
@@ -147,7 +169,7 @@ Key flags:
 
 - If the script reports missing `winget`, install the latest App Installer from the Microsoft Store.
 - `WinError 10049` indicates you are pointing the chat script at `0.0.0.0`; use `127.0.0.1` locally or the actual LAN IP remotely.
-- If Coqui TTS installation fails, rerun `setup.ps1` without `-SkipBuildTools` to ensure the VC toolchain is present.
+- If Piper TTS installation fails, rerun `setup.ps1` without `-SkipBuildTools` to ensure the VC toolchain is present.
 - For audio issues, list devices with:
 
   ```powershell

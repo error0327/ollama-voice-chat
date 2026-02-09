@@ -273,6 +273,42 @@ function Install-PythonDependencies {
     & $venvPython -m pip install -r (Join-Path $Root "requirements.txt")
 }
 
+function Test-NvidiaGpuPresent {
+    if (Get-Command "nvidia-smi" -ErrorAction SilentlyContinue) {
+        return $true
+    }
+    try {
+        $controllers = Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop | Where-Object { $_.Name -match "NVIDIA" }
+        if ($controllers) {
+            return $true
+        }
+    }
+    catch {
+        Write-Verbose "[gpu] Unable to query Win32_VideoController: $($_.Exception.Message)"
+    }
+    return $false
+}
+
+function Install-GpuPythonPackages {
+    param([string]$VenvPath)
+    $venvPython = Join-Path $VenvPath "Scripts/python.exe"
+    if (-not (Test-Path $venvPython)) {
+        throw "Virtual environment python executable missing at $venvPython"
+    }
+
+    if (-not (Test-NvidiaGpuPresent)) {
+        Write-Host "[python] No NVIDIA GPU detected; skipping CUDA toolchain install." -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "[python] Installing ONNX Runtime GPU package." -ForegroundColor Cyan
+    & $venvPython -m pip uninstall -y onnxruntime | Out-Null
+    & $venvPython -m pip install --upgrade onnxruntime-gpu
+
+    Write-Host "[python] Installing faster-whisper with GPU extras." -ForegroundColor Cyan
+    & $venvPython -m pip install --upgrade "faster-whisper[gpu]"
+}
+
 function Pull-OllamaModels {
     param([string[]]$ModelList)
     foreach ($model in $ModelList) {
@@ -309,6 +345,7 @@ try {
     Ensure-FirewallRule
     $venv = Ensure-Venv -Root $root -PythonPath $pythonPath
     Install-PythonDependencies -Root $root -VenvPath $venv
+    Install-GpuPythonPackages -VenvPath $venv
     Ensure-OllamaServe
     Pull-OllamaModels -ModelList $Models
 
